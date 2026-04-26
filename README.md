@@ -1,13 +1,34 @@
 # puma-dev-flake
 
-A Nix flake that packages [puma-dev](https://github.com/puma/puma-dev) (a zero-config Rack/Rails development server with automatic `.test` domains and HTTPS) as a NixOS module.
+A Nix flake that packages [puma-dev](https://github.com/puma/puma-dev) as a
+NixOS module.
 
-On Linux, puma-dev doesn't handle DNS or port forwarding itself. This flake wires up the full stack:
+On Linux, puma-dev doesn't handle DNS or port forwarding itself. This flake
+wires up the full stack:
 
-- **dnsmasq** on port 9253 resolves `*.test` → 127.0.0.1
+- **dnsmasq** on port 9253 resolves `*.test` to `127.0.0.1`
 - **systemd-resolved** forwards `.test` queries to that dnsmasq instance
 - **nftables** NAT rules redirect ports 80/443 to puma-dev's unprivileged ports
-- **SSL CA** generated at build time and trusted system-wide (curl, Chrome, Firefox)
+- **SSL CA** generated at build time and installed system-wide so curl, chrome,
+    Firefox, etc accept the cert
+
+## What is puma-dev?
+
+Allows `https://myapp.test` to resolve to localhost and forwards requests to the
+rails/rack app you've symlinked to `~/.puma-dev/myapp` (over a unix socket, if
+it can), or to whatever app is serving on the port number you've written to
+`~/.puma-dev/myapp`.
+
+## Why not nixpkgs?
+
+Nixpkgs exists and is fairly easy to submit packages to.
+
+Could this flake get accepted as a package there with very little modification?
+Maybe. But, puma-dev hasn't had updates in years and could have glaring security
+issues. I need to use this for some projects I'm working on, and want to make
+the solution I've found to getting it running with other devs. I don't think
+it's safe enough to show up in package search results to NixOS users who expect
+the package repository to contain up-to-date and secure software.
 
 ## NixOS Integration
 
