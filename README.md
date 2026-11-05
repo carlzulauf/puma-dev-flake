@@ -9,8 +9,8 @@ wires up the full stack:
 - **dnsmasq** on port 9253 resolves `*.test` to `127.0.0.1`
 - **systemd-resolved** forwards `.test` queries to that dnsmasq instance
 - **nftables** NAT rules redirect ports 80/443 to puma-dev's unprivileged ports
-- **SSL CA** generated at build time and installed system-wide so curl, chrome,
-    Firefox, etc accept the cert
+- **SSL CA** you generate on each machine (see below) is trusted system-wide so
+    curl, Chrome, Firefox, etc accept puma-dev's certs
 
 ## What is puma-dev?
 
@@ -62,8 +62,32 @@ In your machine's configuration:
 services.puma-dev = {
   enable = true;
   user = "myuser";  # the user whose home directory holds app symlinks
+  caCertificate = ./puma-dev/myhostname.pem;  # see step 4
 };
 ```
+
+### 4. Generate the CA
+
+puma-dev signs a cert for each `.test` domain with the CA in
+`~/.puma-dev-ssl/` (`cert.pem` and `key.pem`). Generate it once on each
+machine, as the puma-dev user, and keep the key there:
+
+```bash
+mkdir -p -m 700 ~/.puma-dev-ssl
+openssl req -x509 -new -newkey rsa:2048 -nodes -days 3650 \
+  -subj "/CN=puma-dev CA ($(hostname))" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout ~/.puma-dev-ssl/key.pem -out ~/.puma-dev-ssl/cert.pem
+chmod 600 ~/.puma-dev-ssl/key.pem
+```
+
+Then copy `~/.puma-dev-ssl/cert.pem` into your config (e.g.
+`./puma-dev/myhostname.pem`) for `caCertificate`. Only the public cert goes into
+the config and the Nix store. Each machine needs its own CA: the CA is not
+generated in a derivation, because that would put the private key in the
+world-readable store, and machines sharing that store path (remote builds,
+`nix copy`, binary caches) would end up trusting each other's CA.
 
 ### Configuration options
 
@@ -75,6 +99,7 @@ services.puma-dev = {
 | `httpPort` | `9280` | Unprivileged HTTP port (port 80 forwards here) |
 | `httpsPort` | `9283` | Unprivileged HTTPS port (port 443 forwards here) |
 | `idleTimeout` | `"15m"` | How long before an idle app is stopped |
+| `caCertificate` | `null` | Public cert of the CA in `~/.puma-dev-ssl`, trusted system-wide |
 
 ## Setting up an app
 

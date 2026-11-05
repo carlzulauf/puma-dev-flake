@@ -42,31 +42,17 @@
         };
       };
 
-      # Generates a self-signed CA certificate at build time via openssl.
-      # The result ($out/cert.pem, $out/key.pem) is deployed to ~/.puma-dev-ssl/
-      # by the activation script so puma-dev uses it instead of generating its own
-      # (puma-dev's self-generated cert leaves CACert nil, breaking HTTPS).
-      mkPumaDevCerts = pkgs: pkgs.runCommand "puma-dev-certs" {
-        nativeBuildInputs = [ pkgs.openssl ];
-      } ''
-        mkdir -p "$out"
-        openssl req \
-          -new -newkey rsa:2048 \
-          -days 3650 \
-          -nodes \
-          -x509 \
-          -subj "/CN=puma-dev CA" \
-          -addext "basicConstraints=critical,CA:TRUE" \
-          -addext "keyUsage=critical,keyCertSign,cRLSign" \
-          -keyout "$out/key.pem" \
-          -out    "$out/cert.pem"
-      '';
-
+      # The CA is deliberately not generated here. A CA generated inside a
+      # derivation puts its private key in the world-readable store, and since
+      # the output is not reproducible, machines sharing a store path (remote
+      # builds, `nix copy`, binary caches) end up trusting each other's CA
+      # instead of their own. Each machine generates its CA in
+      # ~<user>/.puma-dev-ssl and passes only the public cert in as
+      # `caCertificate` (see README).
       nixosModule = { config, lib, pkgs, ... }:
         let
           cfg   = config.services.puma-dev;
           pkg   = mkPumaDev pkgs;
-          certs = mkPumaDevCerts pkgs;
         in {
           options.services.puma-dev = {
             enable = lib.mkEnableOption "puma-dev development server";
@@ -105,6 +91,19 @@
               default = "15m";
               description = "How long before an idle app is stopped (e.g. 15m, 1h).";
             };
+
+            caCertificate = lib.mkOption {
+              type    = lib.types.nullOr lib.types.path;
+              default = null;
+              example = lib.literalExpression "./puma-dev/myhost.pem";
+              description = ''
+                Public certificate (PEM) of the CA puma-dev signs its certs with,
+                trusted system-wide and by Firefox. It must be the cert in
+                ~<user>/.puma-dev-ssl/cert.pem, next to its key.pem, which never
+                enter the Nix store. When null, nothing is trusted and browsers
+                reject puma-dev's certs.
+              '';
+            };
           };
 
           config = lib.mkIf cfg.enable (
@@ -121,22 +120,24 @@
             networking.nftables.enable = lib.mkDefault true;
             networking.firewall.enable = lib.mkDefault true;
 
-            # Deploy the generated cert/key to ~/.puma-dev-ssl/ so puma-dev uses the trusted CA on startup.
-            system.activationScripts."puma-dev-ssl" = {
+            warnings = lib.optional (cfg.caCertificate == null)
+              "services.puma-dev.caCertificate is not set, so puma-dev's HTTPS certs will not be trusted.";
+
+            # The CA is generated outside Nix, so all activation can do is
+            # point out when the trusted cert isn't the one puma-dev uses.
+            system.activationScripts."puma-dev-ssl" = lib.mkIf (cfg.caCertificate != null) {
               text = ''
-                dir=/home/${cfg.user}/.puma-dev-ssl
-                mkdir -p "$dir"
-                install -m 644 ${certs}/cert.pem "$dir/cert.pem"
-                install -m 600 ${certs}/key.pem  "$dir/key.pem"
-                chown -R ${cfg.user} "$dir"
+                if ! ${pkgs.diffutils}/bin/cmp -s ${cfg.caCertificate} ${homeDir}/.puma-dev-ssl/cert.pem; then
+                  echo "warning: ${homeDir}/.puma-dev-ssl/cert.pem is missing or differs from services.puma-dev.caCertificate; puma-dev's HTTPS certs will not be trusted." >&2
+                fi
               '';
             };
 
             # Trust the CA cert system-wide: curl, wget, Chrome, Brave, etc.
-            security.pki.certificateFiles = [ "${certs}/cert.pem" ];
+            security.pki.certificateFiles = lib.optional (cfg.caCertificate != null) cfg.caCertificate;
 
             # Firefox maintains its own NSS store; install via policy.
-            programs.firefox.policies.Certificates.Install = [ "${certs}/cert.pem" ];
+            programs.firefox.policies.Certificates.Install = lib.optional (cfg.caCertificate != null) "${cfg.caCertificate}";
 
             # puma-dev on Linux has no DNS stub, so we run a minimal dnsmasq
             # instance on port 9253 that answers *.test → 127.0.0.1.
@@ -166,6 +167,8 @@
               description = "puma-dev Rack/Rails development server";
               wantedBy    = [ "multi-user.target" ];
               after       = [ "network.target" ];
+              # puma-dev loads its CA at startup, so restart it on a new one.
+              restartTriggers = lib.optional (cfg.caCertificate != null) cfg.caCertificate;
 
               serviceConfig = {
                 User         = cfg.user;
